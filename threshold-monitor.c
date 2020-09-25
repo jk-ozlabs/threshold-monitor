@@ -61,6 +61,11 @@ static bool is_threshold_prop(const char *propname)
 	return false;
 }
 
+/* Called by the sd_bus infrastructure when we see a message that matches
+ * our addmatch filter. In this case, it should be a PropertiesChanged
+ * signal on a Sensor Critical Thresholds interface. Check the changed
+ * properties to determine if we need to take any action.
+ */
 static int propchange_handler(sd_bus_message *msg, void *data,
 		sd_bus_error *errp)
 {
@@ -143,18 +148,19 @@ int main(void)
 	if (rc < 0)
 		errx(EXIT_FAILURE, "can't connect to dbus: %s", strerror(-rc));
 
+	/* establish our match on the critial threshold interface */
 	rc = asprintf(&match,
 			"type='signal',interface='%s',member='%s',arg0='%s'",
 			prop_iface, propchange_member, crit_iface);
 	if (rc < 0)
 		err(EXIT_FAILURE, "unable to define match");
 
-	/* establish our match on the critial threshold interface */
 	rc = sd_bus_add_match(ctx->bus, NULL, match, propchange_handler, ctx);
 	if (rc < 0)
 		errx(EXIT_FAILURE, "can't establish properties match: %s",
 				strerror(-rc));
 
+	/* core event loop: just process all dbus events */
 	for (;;) {
 		rc = sd_bus_process(ctx->bus, NULL);
 		if (rc < 0) {
@@ -162,6 +168,7 @@ int main(void)
 			break;
 		}
 
+		/* no events? wait for the next */
 		if (rc == 0)
 			sd_bus_wait(ctx->bus, UINT64_MAX);
 	}
