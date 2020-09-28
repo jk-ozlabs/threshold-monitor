@@ -17,14 +17,70 @@
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 
+enum threshold_type {
+	T_HIGH = 0x1,
+	T_LOW = 0x2,
+};
+
+struct sensor_config {
+	const char	*path;
+	int		thresholds;
+};
+
+/* Example configuration:
+ *  - monitor for low and high events on Temp1
+ *  - monitor only for high events on Temp2
+ */
+struct sensor_config sensor_configs[] = {
+	{"/xyz/openbmc_project/sensors/temperature/Temp1", T_LOW | T_HIGH },
+	{"/xyz/openbmc_project/sensors/temperature/Temp2", T_HIGH },
+};
+
 static const char *prop_iface = "org.freedesktop.DBus.Properties";
 static const char *propchange_member = "PropertiesChanged";
 static const char *crit_iface = "xyz.openbmc_project.Sensor.Threshold.Critical";
-static const char *crit_props[] = { "CriticalAlarmHigh", "CriticalAlarmLow" };
+
+/* mapping of configuration config values to property names */
+struct {
+	int		config;
+	const char	*prop;
+} prop_names[] = {
+	{ T_HIGH, "CriticalAlarmHigh" },
+	{ T_LOW, "CriticalAlarmLow" },
+};
 
 struct ctx {
 	sd_bus	*bus;
 };
+
+static bool threshold_prop_matches_config(const struct sensor_config *config,
+		const char *propname)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(prop_names); i++) {
+		if (!strcmp(prop_names[i].prop, propname))
+			return config->thresholds & prop_names[i].config;
+	}
+
+	return false;
+}
+
+static const struct sensor_config *find_sensor_config(const char *path)
+{
+	unsigned int i;
+
+	if (!path)
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(sensor_configs); i++) {
+		struct sensor_config *cfg = &sensor_configs[i];
+		if (!strcmp(cfg->path, path))
+			return cfg;
+	}
+
+	return NULL;
+}
 
 static void handle_critical_threshold(struct ctx *ctx,
 		const char *path, const char *prop)
@@ -49,18 +105,6 @@ static void handle_critical_threshold(struct ctx *ctx,
 		printf("failed to trigger host transition\n");
 }
 
-static bool is_threshold_prop(const char *propname)
-{
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(crit_props); i++) {
-		if (!strcmp(crit_props[i], propname))
-			return true;
-	}
-
-	return false;
-}
-
 /* Called by the sd_bus infrastructure when we see a message that matches
  * our addmatch filter. In this case, it should be a PropertiesChanged
  * signal on a Sensor Critical Thresholds interface. Check the changed
@@ -69,9 +113,11 @@ static bool is_threshold_prop(const char *propname)
 static int propchange_handler(sd_bus_message *msg, void *data,
 		sd_bus_error *errp)
 {
+	const struct sensor_config *sensor;
 	bool threshold_asserted;
 	char *iface, *propname;
 	struct ctx *ctx = data;
+	const char *sender;
 	int rc;
 
 	(void)ctx;
@@ -87,6 +133,12 @@ static int propchange_handler(sd_bus_message *msg, void *data,
 		return rc;
 
 	if (strcmp(iface, crit_iface))
+		return 0;
+
+	/* is this from a sensor that we are listening for? */
+	sender = sd_bus_message_get_path(msg);
+	sensor = find_sensor_config(sender);
+	if (!sensor)
 		return 0;
 
 	/* process changed properties, looking for the threshold states */
@@ -106,7 +158,7 @@ static int propchange_handler(sd_bus_message *msg, void *data,
 		if (rc < 0)
 			break;
 
-		if (!is_threshold_prop(propname)) {
+		if (!threshold_prop_matches_config(sensor, propname)) {
 			sd_bus_message_skip(msg, "v");
 		} else {
 			int tmp;
@@ -125,10 +177,6 @@ static int propchange_handler(sd_bus_message *msg, void *data,
 	}
 
 	if (threshold_asserted) {
-		const char *sender;
-
-		sender = sd_bus_message_get_path(msg);
-
 		handle_critical_threshold(ctx, sender, propname);
 	}
 
